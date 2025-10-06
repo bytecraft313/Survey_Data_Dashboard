@@ -173,7 +173,7 @@ if 0 not in verif_counts["verified"].values:
 if 1 not in verif_counts["verified"].values:
     verif_counts = pd.concat([verif_counts, pd.DataFrame([{"verified":1,"count":0}])], ignore_index=True)
 verif_counts = verif_counts.sort_values("verified")
-verif_counts["label"] = verif_counts["verified"].map({0: "Not verified / empty", 1: "Externally verified"})
+verif_counts["label"] = verif_counts["verified"].map({0: "Beneficiary Verified", 1: "Externally verified"})
 
 fig2 = px.pie(verif_counts, names="label", values="count", title="External verification distribution")
 st.plotly_chart(fig2, use_container_width=True)
