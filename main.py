@@ -1,21 +1,18 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import glob
-import os
-import pydeck as pdk
-from datetime import datetime
+import folium
+from streamlit_folium import st_folium
+import plotly.express as px
 
-# ---------- Config ----------
-DATA_FOLDER = "."  # folder with your .xlsx files
+#TODO Refactor & Optimize
+#TODO Fix IDE alerts
+
+# Config
+DATA_FILE = "EFSP_Dashboard_Data.xlsx"
 KEY_COLUMNS = [
     "KEY",
     "review_status",
-    "surveyor_comments",
-    "door_tag_photo_directly_from_the_door_tag",
-    "door_tag_photo_of_the_door_from_an_angle",
-    "TA",
-    "AA",
     "SubmissionDate",
     "Geopoint1-Latitude",
     "Geopoint1-Longitude",
@@ -26,53 +23,31 @@ KEY_COLUMNS = [
     "Province",
     "District",
     "Village",
-    "benef_name_full",
     "external_verification",
-    # external verification related
-    "name_community_elder",
-    "phonenumber_community_elder",
-    "community_elder_verification",
-    "community_elder_verification_photo",
+    "duration"
 ]
 
-LINK_COLUMNS = [
-    "surveyor_comments",
-    "door_tag_photo_directly_from_the_door_tag",
-    "door_tag_photo_of_the_door_from_an_angle",
-    "TA",
-    "AA",
-    "community_elder_verification_photo",
-]
-
-# ---------- Helper functions ----------
+# Helper functions
 @st.cache_data
-def load_and_combine_excel_files(folder_path: str) -> pd.DataFrame:
-    """Load all .xlsx files in folder_path, align columns by name, concat, and clean."""
-    files = glob.glob(os.path.join(folder_path, "*.xlsx"))
-    dfs = []
-    for f in files:
-        try:
-            # read the first sheet
-            df = pd.read_excel(f, engine="openpyxl")
-        except Exception as e:
-            st.warning(f"Could not read {f}: {e}")
-            continue
-        # Normalize: keep only known columns (if present), preserve others too
-        # Ensure all KEY_COLUMNS are present
-        for col in KEY_COLUMNS:
-            if col not in df.columns:
-                df[col] = pd.NA
-        df["__source_file"] = os.path.basename(f)
-        dfs.append(df)
-    if not dfs:
-        return pd.DataFrame(columns=KEY_COLUMNS + ["__source_file"])
-    combined = pd.concat(dfs, ignore_index=True, sort=False)
+def load_excel_file(file_path: str) -> pd.DataFrame:
+    """Load Excel file, align columns by name, clean and add lat/lon."""
+    try:
+        df = pd.read_excel(file_path, engine="openpyxl")
+    except Exception as e:
+        st.error(f"Could not read {file_path}: {e}")
+        return pd.DataFrame(columns=KEY_COLUMNS)
+
+    # Ensure all KEY_COLUMNS are present
+    for col in KEY_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.NA
 
     # Normalize SubmissionDate
-    if "SubmissionDate" in combined.columns:
-        combined["SubmissionDate"] = pd.to_datetime(combined["SubmissionDate"], errors="coerce")
+    if "SubmissionDate" in df.columns:
+        df["SubmissionDate"] = pd.to_datetime(df["SubmissionDate"], errors="coerce")
 
-    # Prefer Geopoint1 coordinates, but keep both for reference
+#TODO: Return the records that do not have neither GPS Points
+    # Geopoint1 coordinates, fallback to geopoing
     def pick_lat(row):
         if pd.notna(row.get("Geopoint1-Latitude")) and pd.notna(row.get("Geopoint1-Longitude")):
             return row["Geopoint1-Latitude"], row["Geopoint1-Longitude"]
@@ -80,45 +55,41 @@ def load_and_combine_excel_files(folder_path: str) -> pd.DataFrame:
             return row["geopoint-Latitude"], row["geopoint-Longitude"]
         return (pd.NA, pd.NA)
 
-    coords = combined.apply(pick_lat, axis=1, result_type="expand")
+    coords = df.apply(pick_lat, axis=1, result_type="expand")
     coords.columns = ["lat", "lon"]
-    combined = pd.concat([combined, coords], axis=1)
+    df = pd.concat([df, coords], axis=1)
 
-    # external_verification -> numeric if possible (0/1)
-    if "external_verification" in combined.columns:
-        combined["external_verification"] = pd.to_numeric(combined["external_verification"], errors="coerce").fillna(0).astype(int)
+    # external_verification -> numeric
+    if "external_verification" in df.columns:
+        df["external_verification"] = pd.to_numeric(df["external_verification"], errors="coerce").fillna(0).astype(int)
 
-    # Fill empty strings/nulls with "Not provided" for display columns (but keep lat/lon numeric NaN)
-    display_fill_cols = [c for c in combined.columns if c not in ["lat", "lon", "SubmissionDate", "external_verification"]]
-    combined[display_fill_cols] = combined[display_fill_cols].fillna("Not provided")
-    # For numeric lat/lon, keep NaN where missing
-    return combined
+    # Fill empty strings/nulls with "Not provided" for display columns (except lat/lon, numeric fields)
+    display_fill_cols = [c for c in df.columns if c not in ["lat", "lon", "SubmissionDate", "external_verification", "duration"]]
+    df[display_fill_cols] = df[display_fill_cols].fillna("Not provided")
 
-def make_link_markdown(url: str, label="Link"):
-    if not url or url == "Not provided" or pd.isna(url):
-        return "Not provided"
-    # sanitize
-    url = str(url).strip()
-    return f"[{label}]({url})"
+    return df
 
 def percent(part, whole):
     return round(100 * (part / whole), 1) if whole else 0.0
 
-# ---------- Load data ----------
+# Load data
 st.set_page_config(page_title="Surveyor Dashboard", layout="wide", initial_sidebar_state="expanded")
 st.title("Surveyor Submissions Dashboard")
 
-df = load_and_combine_excel_files(DATA_FOLDER)
+df = load_excel_file(DATA_FILE)
 
 if df.empty:
-    st.warning(f"No data found in folder `{DATA_FOLDER}`. Please ensure it contains .xlsx files.")
+    st.warning(f"No data found in `{DATA_FILE}`.")
     st.stop()
 
-# ---------- Sidebar filters ----------
+# SECTION Sidebar Filters
 st.sidebar.header("Filters")
-surveyor_list = ["All Surveyors"] + sorted(df["Surveyor_Name"].unique().tolist())
+
+# Surveyor filter
+surveyor_list = ["All Surveyors"] + sorted(df["Surveyor_Name"].dropna().unique().tolist())
 selected_surveyor = st.sidebar.selectbox("Select Surveyor", surveyor_list)
 
+# Date filter
 min_date = df["SubmissionDate"].min()
 max_date = df["SubmissionDate"].max()
 if pd.notna(min_date) and pd.notna(max_date):
@@ -126,20 +97,52 @@ if pd.notna(min_date) and pd.notna(max_date):
 else:
     date_range = None
 
-# Apply filters
+# Province filter
+province_list = ["All Provinces"] + sorted(df["Province"].dropna().unique().tolist())
+selected_province = st.sidebar.selectbox("Select Province", province_list)
+
+# District filter (depends on Province)
+if selected_province != "All Provinces":
+    district_list = ["All Districts"] + sorted(df[df["Province"] == selected_province]["District"].dropna().unique().tolist())
+else:
+    district_list = ["All Districts"] + sorted(df["District"].dropna().unique().tolist())
+selected_district = st.sidebar.selectbox("Select District", district_list)
+
+# Village filter (depends on District)
+if selected_district != "All Districts":
+    village_list = ["All Villages"] + sorted(df[df["District"] == selected_district]["Village"].dropna().unique().tolist())
+else:
+    village_list = ["All Villages"] + sorted(df["Village"].dropna().unique().tolist())
+selected_village = st.sidebar.selectbox("Select Village", village_list)
+
+# Apply Filters
 filtered = df.copy()
+
+# Surveyor filter
 if selected_surveyor != "All Surveyors":
     filtered = filtered[filtered["Surveyor_Name"] == selected_surveyor]
 
+# Date range filter
 if date_range and len(date_range) == 2:
     start, end = date_range
-    # include the end day
     filtered = filtered[
         (filtered["SubmissionDate"].isna()) |
         ((filtered["SubmissionDate"].dt.date >= start) & (filtered["SubmissionDate"].dt.date <= end))
     ]
 
-# ---------- Key Metrics ----------
+# Province filter
+if selected_province != "All Provinces":
+    filtered = filtered[filtered["Province"] == selected_province]
+
+# District filter
+if selected_district != "All Districts":
+    filtered = filtered[filtered["District"] == selected_district]
+
+# Village filter
+if selected_village != "All Villages":
+    filtered = filtered[filtered["Village"] == selected_village]
+
+# SECTION Key Metrics
 total_sub = len(filtered)
 total_verified = int(filtered["external_verification"].sum()) if "external_verification" in filtered.columns else 0
 pct_verified = percent(total_verified, total_sub)
@@ -152,29 +155,24 @@ col4.metric("Unique villages", filtered["Village"].nunique() if "Village" in fil
 
 st.markdown("---")
 
-# ---------- Charts ----------
+
+# SECTION: Charts
 st.header("Overview Charts")
-import plotly.express as px
 
-# submissions per surveyor (global)
-if selected_surveyor == "All Surveyors":
-    subs_by_surveyor = df.groupby("Surveyor_Name", dropna=False).size().reset_index(name="count")
-    fig1 = px.bar(subs_by_surveyor.sort_values("count", ascending=False),
-                  x="Surveyor_Name", y="count", title="Submissions per Surveyor")
-    st.plotly_chart(fig1, use_container_width=True)
-else:
-    st.write(f"Showing data for **{selected_surveyor}**")
+# Submissions per surveyor (filtered dataset)
+subs_by_surveyor = filtered.groupby("Surveyor_Name", dropna=False).size().reset_index(name="count")
+fig1 = px.bar(subs_by_surveyor.sort_values("count", ascending=False),
+              x="Surveyor_Name", y="count", title="Submissions per Surveyor")
+st.plotly_chart(fig1, use_container_width=True)
 
-# Verified vs not
+# Externally Verified vs not
 verif_counts = filtered["external_verification"].value_counts().rename_axis("verified").reset_index(name="count")
-# ensure both categories exist
 if 0 not in verif_counts["verified"].values:
     verif_counts = pd.concat([verif_counts, pd.DataFrame([{"verified":0,"count":0}])], ignore_index=True)
 if 1 not in verif_counts["verified"].values:
     verif_counts = pd.concat([verif_counts, pd.DataFrame([{"verified":1,"count":0}])], ignore_index=True)
 verif_counts = verif_counts.sort_values("verified")
-verif_counts["label"] = verif_counts["verified"].map({0: "Not verified / empty", 1: "Externally verified"})
-
+verif_counts["label"] = verif_counts["verified"].map({0: "Beneficiary Verified", 1: "Externally verified"})
 fig2 = px.pie(verif_counts, names="label", values="count", title="External verification distribution")
 st.plotly_chart(fig2, use_container_width=True)
 
@@ -190,174 +188,156 @@ else:
 
 st.markdown("---")
 
-# ---------- Map ----------
+# SECTION Map
 st.header("Map of Submissions")
 
-# Build map points
 map_df = filtered.copy()
 map_df = map_df[map_df["lat"].notna() & map_df["lon"].notna()].copy()
 
 if map_df.empty:
     st.info("No GPS points available for the current filters.")
 else:
-    # color by external_verification
-    def color_row(ev):
-        try:
-            v = int(ev)
-            if v == 1:
-                return [255, 0, 0]  # red
-        except Exception:
-            pass
-        return [0, 200, 0]  # green-ish
-
-    map_df["color"] = map_df["external_verification"].apply(color_row)
-
-    # pydeck layer
-    tooltip = {
-        "html": "<b>KEY:</b> {KEY} <br/>"
-                "<b>Beneficiary:</b> {benef_name_full} <br/>"
-                "<b>Province:</b> {Province} <br/>"
-                "<b>District:</b> {District} <br/>"
-                "<b>Village:</b> {Village}",
-        "style": {"backgroundColor": "steelblue", "color": "white"}
-    }
-
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=map_df,
-        pickable=True,
-        get_position='[lon, lat]',
-        get_fill_color="color",
-        get_radius=50,
-        radiusScale=10,
-        radiusMinPixels=3,
-        radiusMaxPixels=40,
-        tooltip=tooltip,
+    view_mode = st.radio(
+        "Map View Mode:",
+        ["Default View", "Line View", "Label View"],
+        horizontal=True
     )
 
-    # initial view state: center on mean coords
-    view_state = pdk.ViewState(
-        latitude=map_df["lat"].mean(),
-        longitude=map_df["lon"].mean(),
-        zoom=8,
-        pitch=0,
+    def get_color(ev):
+        return "red" if int(ev) == 1 else "green"
+
+    map_df["color"] = map_df["external_verification"].apply(get_color)
+
+    # Initialize Folium map
+    m = folium.Map(
+        location=[map_df["lat"].mean(), map_df["lon"].mean()],
+        zoom_start=9
     )
 
-    r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip=tooltip)
-    st.pydeck_chart(r)
+    # Specific surveyor or all
+    if selected_surveyor != "All Surveyors":
+        df_plot = map_df[map_df["Surveyor_Name"] == selected_surveyor].sort_values("SubmissionDate").copy()
+        df_plot["Order"] = range(1, len(df_plot)+1)
+    else:
+        df_plot = map_df.copy()
+        df_plot["Order"] = range(1, len(df_plot)+1)
 
-    st.caption("""Hover over points to see KEY and basic info.
+    # Default and Label View
+    if view_mode in ["Default View", "Label View"]:
+        from folium.plugins import MarkerCluster
 
-    Note: Streamlit/pydeck shows tooltips on hover/pick. 
-    To view full details of any record, select the KEY from the selector below.""")
-
-st.markdown("---")
-
-# ---------- KEY selector to view record details ----------
-st.header("Record Explorer")
-
-# create a list of KEYs for selector
-key_options = ["-- Select a record by KEY (or leave blank) --"] + map_df["KEY"].astype(str).tolist() + \
-              [k for k in filtered["KEY"].astype(str).tolist() if k not in map_df["KEY"].astype(str).tolist()]
-
-selected_key = st.selectbox("Select KEY to view details", key_options)
-
-def render_media_links(row):
-    """Return markdown block with links and inline previews where possible (images/audio)."""
-    md = []
-    for col in LINK_COLUMNS:
-        if col in row.index:
-            val = row[col]
-            if val == "Not provided" or pd.isna(val):
-                md.append(f"**{col}:** Not provided  ")
+        cluster = MarkerCluster().add_to(m)
+        for idx, row in df_plot.iterrows():
+            # Convert duration from seconds to minutes
+            if pd.notna(row['duration']):
+                duration_min = round(row['duration'] / 60)  # integer minutes
             else:
-                # show as link; for images show inline small preview
-                url = str(val).strip()
-                if any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"]):
-                    # image
-                    md.append(f"**{col}:** [{os.path.basename(url)}]({url})  ")
-                    # show preview
-                    md.append(f"![img preview]({url}){{width=200}}  ")
-                elif any(url.lower().endswith(ext) for ext in [".mp3", ".wav", ".ogg", ".m4a"]):
-                    md.append(f"**{col}:** [{os.path.basename(url)}]({url})  ")
-                    # Streamlit has st.audio; we'll show audio below separately
-                else:
-                    md.append(f"**{col}:** [{os.path.basename(url)}]({url})  ")
-    return "\n".join(md)
+                duration_min = "Not provided"
 
-def show_record_details(df_all, key):
-    if key == "-- Select a record by KEY (or leave blank) --":
-        st.info("Select a KEY to see the full record details, media and verification info.")
-        return
-    rec = df_all[df_all["KEY"].astype(str) == str(key)]
-    if rec.empty:
-        st.warning("KEY not found in current filtered dataset.")
-        return
-    # if multiple records with same KEY, show all
-    for i, row in rec.iterrows():
-        st.subheader(f"Record KEY: {row['KEY']}")
-        st.markdown(f"**Surveyor:** {row.get('Surveyor_Name', 'Not provided')}")
-        st.markdown(f"**Beneficiary:** {row.get('benef_name_full', 'Not provided')}")
-        st.markdown(f"**Province / District / Village:** {row.get('Province', 'Not provided')} / {row.get('District', 'Not provided')} / {row.get('Village', 'Not provided')}")
-        sd = row.get("SubmissionDate")
-        st.markdown(f"**SubmissionDate:** {sd if pd.isna(sd) == False else 'Not provided'}")
-        st.markdown(f"**Review status:** {row.get('review_status', 'Not provided')}")
-        st.markdown(f"**External verification:** { 'Yes' if int(row.get('external_verification',0))==1 else 'No' }")
-        # If verified show elder info conditionally
-        if int(row.get('external_verification', 0)) == 1:
-            st.markdown("**External verification details:**")
-            st.markdown(f"- Name: {row.get('name_community_elder', 'Not provided')}")
-            st.markdown(f"- Phone(s): {row.get('phonenumber_community_elder', 'Not provided')}")
-            st.markdown(f"- Verification notes: {row.get('community_elder_verification', 'Not provided')}")
-        # Show coordinates
-        if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
-            st.markdown(f"**Coordinates (lat,lon):** {row['lat']}, {row['lon']}")
-            # tiny map for this single point
-            st.map(pd.DataFrame({"lat":[row['lat']],"lon":[row['lon']]}))
-        else:
-            st.markdown("**Coordinates:** Not provided")
+            popup_text = f"""
+            <b>KEY:</b> {row['KEY']}<br>
+            <b>Order:</b> {row['Order']}<br>
+            <b>SubmissionDate:</b> {row['SubmissionDate']}<br>
+            <b>Province:</b> {row['Province']}<br>
+            <b>District:</b> {row['District']}<br>
+            <b>Village:</b> {row['Village']}<br>
+            <b>Duration (min):</b> {duration_min}
+            """
+            if view_mode == "Label View":
+                folium.CircleMarker(
+                    location=[row["lat"], row["lon"]],
+                    radius=15,
+                    color="black",
+                    fill=True,
+                    fill_color=get_color(row["external_verification"]),
+                    fill_opacity=0.9,
+                    popup=folium.Popup(popup_text, max_width=300)
+                ).add_to(m)
+                folium.map.Marker(
+                    [row["lat"], row["lon"]],
+                    icon=folium.DivIcon(html=f"""<div style="font-size:14px; color:white; font-weight:bold; text-align:center">{row['Order']}</div>""")
+                ).add_to(m)
+            else:
+                folium.CircleMarker(
+                    location=[row["lat"], row["lon"]],
+                    radius=10,
+                    color="black",
+                    fill=True,
+                    fill_color=get_color(row["external_verification"]),
+                    fill_opacity=0.8,
+                    popup=folium.Popup(popup_text, max_width=300)
+                ).add_to(cluster)
 
-        # Show media links + audio players if available
-        media_md = render_media_links(row)
-        if media_md:
-            st.markdown(media_md, unsafe_allow_html=True)
+    # Line View
+    if view_mode == "Line View" and selected_surveyor != "All Surveyors":
+        coords = df_plot[["lat", "lon"]].values.tolist()
+        folium.PolyLine(coords, color="blue", weight=4, opacity=0.7).add_to(m)
+        for idx, row in df_plot.iterrows():
+            duration_min = f"{int(row['duration'])} min" if pd.notna(row['duration']) else "Not provided"
+            popup_text = f"""
+            <b>KEY:</b> {row['KEY']}<br>
+            <b>Order:</b> {row['Order']}<br>
+            <b>SubmissionDate:</b> {row['SubmissionDate']}<br>
+            <b>Province:</b> {row['Province']}<br>
+            <b>District:</b> {row['District']}<br>
+            <b>Village:</b> {row['Village']}<br>
+            <b>Duration:</b> {duration_min}
+            """
+            folium.CircleMarker(
+                location=[row["lat"], row["lon"]],
+                radius=12,
+                color="black",
+                fill=True,
+                fill_color=get_color(row["external_verification"]),
+                fill_opacity=0.9,
+                popup=folium.Popup(popup_text, max_width=300)
+            ).add_to(m)
 
-        # For audio links, use st.audio if available
-        for col in LINK_COLUMNS:
-            val = row.get(col, "Not provided")
-            if isinstance(val, str) and any(val.lower().endswith(ext) for ext in [".mp3", ".wav", ".ogg", ".m4a"]):
-                try:
-                    st.audio(val)
-                except Exception as e:
-                    st.write(f"Audio: [{val}]({val})")
-        st.markdown("---")
+    st_folium(m, width=1000, height=600)
 
-# show details for the selected key
-show_record_details(filtered, selected_key)
+# SECTION: KEY selector to view record details #TODO: Change to search input
+# st.header("Record Explorer")
+#
+# key_options = ["-- Select a record by KEY (or leave blank) --"] + filtered["KEY"].astype(str).tolist()
+# selected_key = st.selectbox("Select KEY to view details", key_options)
+#
+# def show_record_details(df_all, key):
+#     if key == "-- Select a record by KEY (or leave blank) --":
+#         st.info("Select a KEY to see the full record details.")
+#         return
+#     rec = df_all[df_all["KEY"].astype(str) == str(key)]
+#     if rec.empty:
+#         st.warning("KEY not found in current filtered dataset.")
+#         return
+#
+#     for i, row in rec.iterrows():
+#         st.subheader(f"Record KEY: {row['KEY']}")
+#         st.markdown(f"**Surveyor:** {row.get('Surveyor_Name', 'Not provided')}")
+#         st.markdown(f"**Province / District / Village:** {row.get('Province', 'Not provided')} / {row.get('District', 'Not provided')} / {row.get('Village', 'Not provided')}")
+#         sd = row.get("SubmissionDate")
+#         st.markdown(f"**SubmissionDate:** {sd if pd.isna(sd) == False else 'Not provided'}")
+#         st.markdown(f"**Review status:** {row.get('review_status', 'Not provided')}")
+#         st.markdown(f"**External verification:** { 'Yes' if int(row.get('external_verification',0))==1 else 'No' }")
+#         st.markdown(f"**Duration:** {row.get('duration', 'Not provided')}")
+#
+#         # Show coordinates
+#         if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
+#             st.markdown(f"**Coordinates (lat,lon):** {row['lat']}, {row['lon']}")
+#             st.map(pd.DataFrame({"lat":[row['lat']],"lon":[row['lon']]}))
+#         else:
+#             st.markdown("**Coordinates:** Not provided")
+#         st.markdown("---")
+#
+# show_record_details(filtered, selected_key)
 
-# ---------- Table Summary ----------
-st.header("Tabular View (clickable links)")
-
-# prepare display DataFrame
+# SECTION: Table Summary
+st.header("Tabular View")
 display_cols = [
     "KEY", "Surveyor_Name", "Surveyor_Id", "SubmissionDate",
-    "Province", "District", "Village", "benef_name_full",
-    "external_verification", "review_status"
+    "Province", "District", "Village",
+    "external_verification", "review_status", "duration"
 ]
-# extend with link columns
-display_cols += [c for c in LINK_COLUMNS if c in filtered.columns]
-
 df_display = filtered[display_cols].copy()
-
-# make human-friendly external verification
 df_display["external_verification"] = df_display["external_verification"].map({1: "Yes", 0: "No"}).fillna("No")
-
-# make links markdown
-for col in LINK_COLUMNS:
-    if col in df_display.columns:
-        df_display[col] = df_display[col].apply(lambda x: make_link_markdown(x, label="Open") if x != "Not provided" else "Not provided")
-
-# Render as HTML table so links are clickable
 st.markdown(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
-
-st.caption("Note: Click 'Open' links to view media. Empty fields show 'Not provided'.")
+st.caption("Note: Empty fields show 'Not provided'.")
