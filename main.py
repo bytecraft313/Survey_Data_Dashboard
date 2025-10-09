@@ -269,11 +269,17 @@ else:
                 ).add_to(cluster)
 
     # Line View
-    if view_mode == "Line View" and selected_surveyor != "All Surveyors":
-        coords = df_plot[["lat", "lon"]].values.tolist()
-        folium.PolyLine(coords, color="blue", weight=4, opacity=0.7).add_to(m)
+    if view_mode in ["Default View", "Label View"]:
+        from folium.plugins import MarkerCluster
+
+        cluster = MarkerCluster().add_to(m)
         for idx, row in df_plot.iterrows():
-            duration_min = f"{int(row['duration'])} min" if pd.notna(row['duration']) else "Not provided"
+            # Convert duration from seconds to minutes
+            if pd.notna(row['duration']):
+                duration_min = round(row['duration'] / 60)  # integer minutes
+            else:
+                duration_min = "Not provided"
+
             popup_text = f"""
             <b>KEY:</b> {row['KEY']}<br>
             <b>Order:</b> {row['Order']}<br>
@@ -281,8 +287,9 @@ else:
             <b>Province:</b> {row['Province']}<br>
             <b>District:</b> {row['District']}<br>
             <b>Village:</b> {row['Village']}<br>
-            <b>Duration:</b> {duration_min}
+            <b>Duration (min):</b> {duration_min}
             """
+
             folium.CircleMarker(
                 location=[row["lat"], row["lon"]],
                 radius=12,
@@ -331,13 +338,13 @@ else:
 # show_record_details(filtered, selected_key)
 
 # SECTION: Table Summary
-st.header("Tabular View")
-display_cols = [
-    "KEY", "Surveyor_Name", "Surveyor_Id", "SubmissionDate",
-    "Province", "District", "Village",
-    "external_verification", "review_status", "duration"
-]
-df_display = filtered[display_cols].copy()
-df_display["external_verification"] = df_display["external_verification"].map({1: "Yes", 0: "No"}).fillna("No")
-st.markdown(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
-st.caption("Note: Empty fields show 'Not provided'.")
+# st.header("Tabular View")
+# display_cols = [
+#     "KEY", "Surveyor_Name", "Surveyor_Id", "SubmissionDate",
+#     "Province", "District", "Village",
+#     "external_verification", "review_status", "duration"
+# ]
+# df_display = filtered[display_cols].copy()
+# df_display["external_verification"] = df_display["external_verification"].map({1: "Yes", 0: "No"}).fillna("No")
+# st.markdown(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
+# st.caption("Note: Empty fields show 'Not provided'.")
